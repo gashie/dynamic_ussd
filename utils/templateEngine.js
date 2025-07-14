@@ -1,24 +1,59 @@
-// Simple template engine for replacing variables
+// Enhanced template engine that handles conditional templates properly
 const interpolateTemplate = (template, data) => {
   if (!template || typeof template !== 'string') {
     return template;
   }
   
-  // Replace {{variable}} with actual values
-  return template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (match, path) => {
-    const keys = path.split('.');
-    let value = data;
+  // Handle conditional templates where multiple variables are concatenated
+  // e.g., {{contribution_amount_self_input}}{{contribution_amount_other_input}}
+  template = template.replace(/(\{\{[^}]+\}\})+/g, (match) => {
+    // Extract all variables in this group
+    const variables = match.match(/\{\{([^}]+)\}\}/g) || [];
     
-    for (const key of keys) {
-      if (value && typeof value === 'object' && key in value) {
-        value = value[key];
-      } else {
-        return match; // Return original if path not found
+    // Try each variable and return the first non-empty value
+    for (const varMatch of variables) {
+      const varName = varMatch.replace(/\{\{|\}\}/g, '');
+      const value = getNestedValue(data, varName);
+      if (value !== undefined && value !== null && value !== '') {
+        return String(value);
       }
     }
     
-    return value !== undefined && value !== null ? String(value) : match;
+    // If all are empty, check if this is required
+    if (variables.length > 1) {
+      return ''; // For concatenated optional fields, return empty
+    }
+    return match; // For single variables, keep the placeholder
   });
+  
+  // Handle individual variables that weren't part of concatenated groups
+  return template.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (match, path) => {
+    const value = getNestedValue(data, path);
+    
+    // For unresolved variables, return empty string instead of the placeholder
+    if (value === undefined || value === null || value === '') {
+      console.log(`Template variable not found: ${path}`);
+      return '';
+    }
+    
+    return String(value);
+  });
+};
+
+// Helper to get nested value from object
+const getNestedValue = (obj, path) => {
+  const keys = path.split('.');
+  let value = obj;
+  
+  for (const key of keys) {
+    if (value && typeof value === 'object' && key in value) {
+      value = value[key];
+    } else {
+      return undefined;
+    }
+  }
+  
+  return value;
 };
 
 // Process JSON template (for API body templates)
@@ -59,20 +94,8 @@ const validateRequiredVariables = (template, data) => {
   const missingVars = [];
   
   for (const varPath of requiredVars) {
-    const keys = varPath.split('.');
-    let value = data;
-    let found = true;
-    
-    for (const key of keys) {
-      if (value && typeof value === 'object' && key in value) {
-        value = value[key];
-      } else {
-        found = false;
-        break;
-      }
-    }
-    
-    if (!found || value === undefined || value === null) {
+    const value = getNestedValue(data, varPath);
+    if (value === undefined || value === null || value === '') {
       missingVars.push(varPath);
     }
   }
@@ -173,9 +196,11 @@ const processTemplateWithHelpers = (template, data) => {
     if (templateHelpers[helper]) {
       // First interpolate the value
       const interpolatedValue = interpolateTemplate(`{{${value}}}`, data);
-      return templateHelpers[helper](interpolatedValue);
+      if (interpolatedValue && interpolatedValue !== `{{${value}}}`) {
+        return templateHelpers[helper](interpolatedValue);
+      }
     }
-    return match;
+    return '';
   });
   
   // Then process regular variables
@@ -194,5 +219,6 @@ module.exports = {
   formatCurrency,
   formatDate,
   templateHelpers,
-  processTemplateWithHelpers
+  processTemplateWithHelpers,
+  getNestedValue
 };

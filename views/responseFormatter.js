@@ -4,18 +4,48 @@ const formatUSSDResponse = (menu, isEnd = false) => {
     ? process.env.RESPONSE_TYPE_END || 'END'
     : process.env.RESPONSE_TYPE_CONTINUE || 'CON';
   
-  return `${responseType} ${menu.text || ''}`;
+  // Clean up the text - remove any duplicate options that might have been added
+  let cleanText = menu.text || '';
+  
+  // If the text has numbered options at the end, make sure they're not duplicated
+  const lines = cleanText.split('\n');
+  const uniqueLines = [];
+  const seenOptions = new Set();
+  
+  for (const line of lines) {
+    const optionMatch = line.match(/^(\d+)\.\s+(.+)$/);
+    if (optionMatch) {
+      const optionKey = `${optionMatch[1]}-${optionMatch[2].trim()}`;
+      if (!seenOptions.has(optionKey)) {
+        seenOptions.add(optionKey);
+        uniqueLines.push(line);
+      }
+    } else {
+      uniqueLines.push(line);
+    }
+  }
+  
+  cleanText = uniqueLines.join('\n').trim();
+  
+  return `${responseType} ${cleanText}`;
 };
 
-// Build menu text with options
+// Build menu text with options - avoid duplicates
 const buildMenuText = (textTemplate, options = []) => {
   let text = textTemplate;
   
-  // Add options to text if they exist and not already in template
-  if (options.length > 0 && !textTemplate.includes('\n1.')) {
-    text += '\n\n';
-    options.forEach((option, index) => {
-      text += `${option.id || index + 1}. ${option.label}\n`;
+  // Check if options are already in the template
+  const hasNumberedOptions = /\n\d+\.\s+/.test(textTemplate);
+  
+  if (!hasNumberedOptions && options.length > 0) {
+    // Add a newline if text doesn't end with one
+    if (!text.endsWith('\n')) {
+      text += '\n';
+    }
+    
+    // Add each option
+    options.forEach((option) => {
+      text += `${option.id}. ${option.label}\n`;
     });
   }
   

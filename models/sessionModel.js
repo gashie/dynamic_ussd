@@ -61,7 +61,13 @@ const updateSession = async (sessionId, updates) => {
 };
 
 // Add input to history
+// Update models/sessionModel.js - Replace the addInputToHistory function
+
 const addInputToHistory = async (sessionId, input, menuCode) => {
+  // Check if this is a PIN menu and mask the input
+  const pinMenus = ['contribution_pin', 'enter_pin', 'verify_pin', 'pin_input', 'confirm_pin'];
+  const maskedInput = pinMenus.includes(menuCode) ? '****' : input;
+  
   const sql = `
     UPDATE ussd_sessions
     SET input_history = input_history || $2::jsonb,
@@ -71,7 +77,7 @@ const addInputToHistory = async (sessionId, input, menuCode) => {
   `;
   
   const inputEntry = JSON.stringify([{
-    input,
+    input: maskedInput,  // Store masked value in history
     menu: menuCode,
     timestamp: new Date().toISOString()
   }]);

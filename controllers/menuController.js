@@ -1,7 +1,9 @@
+// controllers/menuController.js - 100% Dynamic Solution (NO HARDCODING)
+
 const { getMenuByCode } = require('../models/menuModel');
 const sessionModel = require('../models/sessionModel');
 const { executeMultipleApiCalls } = require('../utils/apiClient');
-const { processTemplateWithHelpers, interpolateTemplate } = require('../utils/templateEngine');
+const { processTemplateWithHelpers } = require('../utils/templateEngine');
 const { validateInput, parseOptionInput, formatValidationErrors } = require('../utils/inputValidator');
 const { 
   buildMenuText, 
@@ -9,55 +11,54 @@ const {
   getValidationHint 
 } = require('../views/responseFormatter');
 
-// Process menu flow based on input
 const processMenuFlow = async (session, input, app) => {
-  const { current_menu, session_data, input_history } = session;
+  const { current_menu } = session;
   
-  // If no current menu, go to entry menu
   if (!current_menu) {
     return await loadMenu(app.id, app.entry_menu, session);
   }
   
-  // Get current menu
   const currentMenu = await getMenuByCode(app.id, current_menu);
   if (!currentMenu) {
     throw new Error(`Menu not found: ${current_menu}`);
   }
   
-  // Process based on menu type
   switch (currentMenu.menu_type) {
     case 'options':
       return await processOptionsMenu(currentMenu, input, session, app);
-      
     case 'input':
       return await processInputMenu(currentMenu, input, session, app);
-      
     case 'final':
-      return currentMenu; // Final menus don't process input
-      
+      return currentMenu;
     default:
       throw new Error(`Unknown menu type: ${currentMenu.menu_type}`);
   }
 };
 
-// Process options menu
 const processOptionsMenu = async (menu, input, session, app) => {
-  // Handle back navigation
   if (input === '0' && session.input_history.length > 0) {
     return await navigateBack(session, app);
   }
   
-  // First, get the menu's dynamic options from session
+  // Get session variables
   const sessionVariables = await sessionModel.getAllSessionVariables(session.session_id);
   
-  // Determine which options to use
-  let options = await getMenuOptions(menu, sessionVariables);
+  // Find options dynamically
+  let options = findDynamicOptions(menu, sessionVariables);
   
-  // Validate the input
+  console.log(`Menu: ${menu.menu_code}, Found ${options.length} options`);
+  
+  if (!options || options.length === 0) {
+    return {
+      ...menu,
+      text: `No options available for this menu.\n\n0. Back to main menu`
+    };
+  }
+  
+  // Validate input
   const { isValid, selectedOption, error } = parseOptionInput(input, options);
   
   if (!isValid) {
-    // Reload menu to show error
     const freshMenu = await loadMenu(app.id, menu.menu_code, session);
     return {
       ...freshMenu,
@@ -65,11 +66,11 @@ const processOptionsMenu = async (menu, input, session, app) => {
     };
   }
   
-  // Store the selected input
+  // Store user input
   await sessionModel.setSessionVariable(session.session_id, menu.menu_code + '_input', input);
   
-  // Handle dynamic selection BEFORE navigating to next menu
-  await handleDynamicArraySelection(session.session_id, menu.menu_code, input, sessionVariables);
+  // Store selected item data dynamically
+  await storeSelectedData(session.session_id, input, sessionVariables);
   
   // Navigate to next menu
   const nextMenuCode = selectedOption.next || menu.next_menu;
@@ -80,90 +81,97 @@ const processOptionsMenu = async (menu, input, session, app) => {
   return await loadMenu(app.id, nextMenuCode, session);
 };
 
-// Get the correct options for a menu
-const getMenuOptions = async (menu, sessionVariables) => {
-  // First try the menu's own options
-  let options = menu.options;
-  if (typeof options === 'string') {
+// FULLY DYNAMIC option finder
+const findDynamicOptions = (menu, sessionVariables) => {
+  console.log(`Looking for options for menu: ${menu.menu_code}`);
+  
+  // 1. Try menu's built-in options first
+  if (menu.options && menu.options !== '[]') {
     try {
-      options = JSON.parse(options);
-    } catch (e) {
-      options = [];
-    }
-  }
-  
-  // If empty, look for dynamic options based on the menu code
-  if (!options || options.length === 0) {
-    // Map of menu codes to their expected option keys
-    const menuOptionMap = {
-      'make_contribution_groups': 'groups_options',
-      'view_groups_list': 'groups_options',
-      'make_contribution_collabos': 'collabos_options',
-      'view_collabos_list': 'collabos_options',
-      'pending_invitations': 'invitations_options',
-      'edit_subgroup': 'subgroup_options'
-    };
-    
-    const expectedKey = menuOptionMap[menu.menu_code];
-    if (expectedKey && sessionVariables[expectedKey]) {
-      try {
-        const parsedOptions = JSON.parse(sessionVariables[expectedKey]);
-        if (parsedOptions && parsedOptions.length > 0) {
-          options = parsedOptions;
-        }
-      } catch (e) {
-        console.error(`Failed to parse ${expectedKey}:`, e);
+      const parsed = typeof menu.options === 'string' ? JSON.parse(menu.options) : menu.options;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        console.log(`Found static options in menu definition`);
+        return parsed;
       }
+    } catch (e) {}
+  }
+  
+  // 2. Look for ANY variable ending with '_options'
+  console.log('Searching session variables for *_options...');
+  const optionKeys = Object.keys(sessionVariables)
+    .filter(key => key.endsWith('_options'))
+    .sort(); // Sort for consistency
+  
+  console.log(`Found option keys:`, optionKeys);
+  
+  for (const key of optionKeys) {
+    try {
+      const options = JSON.parse(sessionVariables[key]);
+      if (Array.isArray(options) && options.length > 0) {
+        console.log(`Using options from session variable: ${key}`);
+        return options;
+      }
+    } catch (e) {
+      console.log(`Failed to parse ${key}:`, e.message);
     }
   }
   
-  return options || [];
+  console.log('No valid options found');
+  return [];
 };
 
-// Handle dynamic array selection
-const handleDynamicArraySelection = async (sessionId, menuCode, userInput, sessionVariables) => {
+// FULLY DYNAMIC selection storage
+const storeSelectedData = async (sessionId, userInput, sessionVariables) => {
   const selectedIndex = parseInt(userInput) - 1;
+  console.log(`Storing selection for index: ${selectedIndex}`);
   
-  // Map menu codes to their data arrays
-  const selectionMap = {
-    'make_contribution_groups': 'groups',
-    'view_groups_list': 'groups',
-    'make_contribution_collabos': 'collabos',
-    'view_collabos_list': 'collabos',
-    'pending_invitations': 'invitations',
-    'edit_subgroup': 'subgroups'
-  };
+  // Find ALL arrays in session variables
+  const arrayKeys = [];
   
-  const dataKey = selectionMap[menuCode];
-  if (!dataKey) return;
+  for (const [key, value] of Object.entries(sessionVariables)) {
+    // Skip processed/derived keys
+    if (key.includes('_options') || key.includes('_list') || 
+        key.includes('_input') || key.includes('_selected')) {
+      continue;
+    }
+    
+    try {
+      const data = JSON.parse(value);
+      if (Array.isArray(data) && data.length > 0) {
+        arrayKeys.push({ key, data, length: data.length });
+      }
+    } catch (e) {
+      // Not JSON, skip
+    }
+  }
   
-  // Get the array data from session
-  const arrayData = sessionVariables[dataKey];
-  if (!arrayData) return;
+  console.log(`Found ${arrayKeys.length} arrays in session:`, arrayKeys.map(a => `${a.key}(${a.length})`));
   
-  try {
-    const items = JSON.parse(arrayData);
-    if (Array.isArray(items) && selectedIndex >= 0 && selectedIndex < items.length) {
-      const selectedItem = items[selectedIndex];
+  // Store selection from arrays that have the right index
+  for (const { key, data } of arrayKeys) {
+    if (selectedIndex >= 0 && selectedIndex < data.length) {
+      const selectedItem = data[selectedIndex];
+      
+      console.log(`Storing selection from ${key}[${selectedIndex}]:`, selectedItem);
       
       // Store the complete selected item
-      await sessionModel.setSessionVariable(sessionId, `${dataKey}_selected`, JSON.stringify(selectedItem));
+      await sessionModel.setSessionVariable(sessionId, `${key}_selected`, JSON.stringify(selectedItem));
       
-      // Store just the ID for easy access in templates
-      if (selectedItem.id) {
-        await sessionModel.setSessionVariable(sessionId, `${dataKey}_selected_id`, String(selectedItem.id));
+      // Store the ID if it exists
+      if (selectedItem && typeof selectedItem === 'object' && selectedItem.id) {
+        await sessionModel.setSessionVariable(sessionId, `${key}_selected_id`, String(selectedItem.id));
+        console.log(`Stored ${key}_selected_id = ${selectedItem.id}`);
       }
       
-      console.log(`Selected ${dataKey}[${selectedIndex}]:`, selectedItem);
+      // For debugging - also store a readable name if available
+      if (selectedItem && typeof selectedItem === 'object' && selectedItem.name) {
+        await sessionModel.setSessionVariable(sessionId, `${key}_selected_name`, selectedItem.name);
+      }
     }
-  } catch (e) {
-    console.error(`Error handling selection for ${dataKey}:`, e);
   }
 };
 
-// Process input menu
 const processInputMenu = async (menu, input, session, app) => {
-  // Validate input
   const validation = validateInput(input, menu.validation_rules);
   
   if (!validation.isValid) {
@@ -177,11 +185,9 @@ const processInputMenu = async (menu, input, session, app) => {
     };
   }
   
-  // Store input in session
   const variableName = menu.menu_code + '_input';
   await sessionModel.setSessionVariable(session.session_id, variableName, input);
   
-  // Navigate to next menu
   if (!menu.next_menu) {
     throw new Error('No next menu defined for input menu');
   }
@@ -189,18 +195,19 @@ const processInputMenu = async (menu, input, session, app) => {
   return await loadMenu(app.id, menu.next_menu, session);
 };
 
-// Load menu and execute API calls
 const loadMenu = async (appId, menuCode, session) => {
-  const menu = await getMenuByCode(appId, menuCode);
+  console.log(`\nLoading menu: ${menuCode}`);
   
+  const menu = await getMenuByCode(appId, menuCode);
   if (!menu) {
     throw new Error(`Menu not found: ${menuCode}`);
   }
   
-  // Get all session variables
+  // Get current session data
   const sessionVariables = await sessionModel.getAllSessionVariables(session.session_id);
   
-  // Combine session data
+  console.log(`Session variables for ${menuCode}:`, Object.keys(sessionVariables));
+  
   const templateData = {
     ...session.session_data,
     ...sessionVariables,
@@ -210,6 +217,8 @@ const loadMenu = async (appId, menuCode, session) => {
   
   // Execute API calls if defined
   if (menu.api_calls && menu.api_calls.length > 0) {
+    console.log(`Executing ${menu.api_calls.length} API calls for menu: ${menuCode}`);
+    
     try {
       const apiResults = await executeMultipleApiCalls(
         menu.api_calls,
@@ -218,23 +227,27 @@ const loadMenu = async (appId, menuCode, session) => {
         session.session_id
       );
       
-      // Add successful API results to template data
+      console.log(`API results:`, Object.keys(apiResults));
+      
+      // Process ALL API results
       for (const [apiName, result] of Object.entries(apiResults)) {
         if (result.success && result.data) {
+          console.log(`Processing successful API result for ${apiName}:`, Object.keys(result.data));
+          
+          // Add to template data
           Object.assign(templateData, result.data);
           
-          // Store API response data as session variables
+          // Store ALL response data as session variables
           for (const [key, value] of Object.entries(result.data)) {
-            await sessionModel.setSessionVariable(session.session_id, key, 
-              typeof value === 'object' ? JSON.stringify(value) : String(value)
-            );
+            const stringValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
+            await sessionModel.setSessionVariable(session.session_id, key, stringValue);
           }
         } else {
-          console.warn(`API call ${apiName} failed:`, result.error);
+          console.log(`API call ${apiName} failed:`, result.error);
         }
       }
       
-      // Re-read session variables after API calls
+      // Refresh session variables after API calls
       const updatedVariables = await sessionModel.getAllSessionVariables(session.session_id);
       Object.assign(templateData, updatedVariables);
       
@@ -243,61 +256,49 @@ const loadMenu = async (appId, menuCode, session) => {
     }
   }
   
-  // Handle special template variables that might be empty
-  // For contribution confirmation, add details if available
-  if (!templateData.contribution_details) {
-    if (templateData.contribution_member_phone_input) {
-      templateData.contribution_details = `For: ${templateData.member_name || templateData.contribution_member_phone_input}`;
-    } else {
-      templateData.contribution_details = '';
-    }
-  }
-  
-  // Process template
+  // Process text template
   const processedText = processTemplateWithHelpers(menu.text_template, templateData);
   
-  // Build final menu text
+  // Handle options for display
   let finalText = processedText;
-  let correctOptions = menu.options;
+  let dynamicOptions = [];
   
   if (menu.menu_type === 'options') {
-    // Get the correct options for this specific menu
-    correctOptions = await getMenuOptions(menu, templateData);
+    dynamicOptions = findDynamicOptions(menu, templateData);
     
     // Only add options if they're not already in the text
-    const hasNumberedOptions = /\n\d+\./.test(processedText);
-    if (!hasNumberedOptions && correctOptions && correctOptions.length > 0) {
-      finalText = buildMenuText(processedText, correctOptions);
+    if (dynamicOptions.length > 0) {
+      const hasNumberedOptions = /\n\d+\./.test(processedText);
+      if (!hasNumberedOptions) {
+        finalText = buildMenuText(processedText, dynamicOptions);
+      }
     }
   }
   
-  // Update session current menu
+  // Update session
   await sessionModel.updateSession(session.session_id, { 
     currentMenu: menuCode,
     sessionData: templateData
   });
   
+  console.log(`Menu ${menuCode} loaded with ${dynamicOptions.length} options`);
+  
   return {
     ...menu,
     text: finalText,
-    options: correctOptions // Return the correct options
+    options: dynamicOptions
   };
 };
 
-// Navigate back in menu history
 const navigateBack = async (session, app) => {
   const history = session.input_history || [];
   
   if (history.length < 2) {
-    // Go to main menu if no history
     return await loadMenu(app.id, app.entry_menu, session);
   }
   
-  // Get previous menu from history
   const previousEntry = history[history.length - 2];
   const previousMenuCode = previousEntry.menu;
-  
-  // Remove last entry from history
   const newHistory = history.slice(0, -1);
   
   await sessionModel.updateSession(session.session_id, {
@@ -307,45 +308,10 @@ const navigateBack = async (session, app) => {
   return await loadMenu(app.id, previousMenuCode, session);
 };
 
-// Get menu path (for debugging/logging)
-const getMenuPath = (inputHistory) => {
-  return inputHistory
-    .map(entry => entry.menu)
-    .join(' > ');
-};
-
-// Validate menu structure
-const validateMenuStructure = (menu) => {
-  const errors = [];
-  
-  if (!menu.menu_code) {
-    errors.push('Menu code is required');
-  }
-  
-  if (!menu.text_template) {
-    errors.push('Text template is required');
-  }
-  
-  if (menu.menu_type === 'options' && !menu.next_menu && (!menu.options || menu.options.length === 0)) {
-    errors.push('Options menu must have either options with next destinations or a default next_menu');
-  }
-  
-  if (menu.menu_type === 'input' && !menu.next_menu) {
-    errors.push('Input menu must have a next_menu defined');
-  }
-  
-  return {
-    isValid: errors.length === 0,
-    errors
-  };
-};
-
 module.exports = {
   processMenuFlow,
   processOptionsMenu,
   processInputMenu,
   loadMenu,
-  navigateBack,
-  getMenuPath,
-  validateMenuStructure
+  navigateBack
 };
